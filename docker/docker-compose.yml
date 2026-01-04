@@ -1,0 +1,23 @@
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["./server/patient_server", "/data/patient_monitor.db"]
+    ports:
+      - "8080:8080"
+    tty: true
+    stdin_open: true
+    volumes:
+      - patient-data:/data
+
+  device:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["./device_sim/device_sim", "auto", "server", "8080"]
+    depends_on:
+      - server
+
+volumes:
+  patient-data:
