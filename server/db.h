@@ -12,42 +12,51 @@ public:
         if (sqlite3_open(path.c_str(), &db_) != SQLITE_OK) {
             throw std::runtime_error("Failed to open DB: " + std::string(sqlite3_errmsg(db_)));
         }
-        // WAL mode: allows one writer + many readers concurrently, which is a much
-        // better fit here than the default rollback journal.
-        exec("PRAGMA journal_mode=WAL;");
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS readings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                patient_id INTEGER NOT NULL,
-                timestamp INTEGER NOT NULL,
-                heart_rate REAL,
-                systolic_bp REAL,
-                diastolic_bp REAL,
-                spo2 REAL
-            );
-        )");
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                patient_id INTEGER NOT NULL,
-                timestamp INTEGER NOT NULL,
-                vital TEXT,
-                message TEXT,
-                value REAL
-            );
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_readings_patient ON readings(patient_id);");
-
-        // Prepare the insert statement once, reuse it (much faster than
-        // reparsing SQL on every insert).
-        const char* insert_sql =
-            "INSERT INTO readings (patient_id, timestamp, heart_rate, systolic_bp, diastolic_bp, spo2) "
-            "VALUES (?, ?, ?, ?, ?, ?);";
-        sqlite3_prepare_v2(db_, insert_sql, -1, &insert_stmt_, nullptr);
-
-        const char* alert_sql =
-            "INSERT INTO alerts (patient_id, timestamp, vital, message, value) VALUES (?, ?, ?, ?, ?);";
-        sqlite3_prepare_v2(db_, alert_sql, -1, &alert_stmt_, nullptr);
+        
+        try {
+            // WAL mode: allows one writer + many readers concurrently, which is a much
+            // better fit here than the default rollback journal.
+            exec("PRAGMA journal_mode=WAL;");
+            exec(R"(
+                CREATE TABLE IF NOT EXISTS readings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    patient_id INTEGER NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    heart_rate REAL,
+                    systolic_bp REAL,
+                    diastolic_bp REAL,
+                    spo2 REAL
+                );
+            )");
+            exec(R"(
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    patient_id INTEGER NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    vital TEXT,
+                    message TEXT,
+                    value REAL
+                );
+            )");
+            exec("CREATE INDEX IF NOT EXISTS idx_readings_patient ON readings(patient_id);");
+    
+            // Prepare the insert statement once, reuse it (much faster than
+            // reparsing SQL on every insert).
+            const char* insert_sql =
+                "INSERT INTO readings (patient_id, timestamp, heart_rate, systolic_bp, diastolic_bp, spo2) "
+                "VALUES (?, ?, ?, ?, ?, ?);";
+            sqlite3_prepare_v2(db_, insert_sql, -1, &insert_stmt_, nullptr);
+    
+            const char* alert_sql =
+                "INSERT INTO alerts (patient_id, timestamp, vital, message, value) VALUES (?, ?, ?, ?, ?);";
+            sqlite3_prepare_v2(db_, alert_sql, -1, &alert_stmt_, nullptr);
+        } catch (...) {
+            if (insert_stmt_) sqlite3_finalize(insert_stmt_);
+            if (alert_stmt_) sqlite3_finalize(alert_stmt_);
+            if (db_) sqlite3_close(db_);
+            db_ = nullptr;
+            throw;
+        }
     }
 
     ~Database() {

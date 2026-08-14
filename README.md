@@ -1,92 +1,77 @@
 # Real-Time Patient Monitoring System
 
-A multithreaded C++ server that ingests simulated patient vitals over TCP,
-stores them in SQLite, and fires alerts on threshold breaches.
+A high-performance, multithreaded C++ backend infrastructure for a hospital floor. This system continuously ingests simulated patient vitals (Heart Rate, Blood Pressure, SpO2) over TCP, stores them in a SQLite database for historical analysis, and runs an "Alert Engine" to immediately fire alerts on dangerous threshold breaches. The system features a real-time terminal dashboard to monitor live patient streams.
 
-## Directory structure
+## Architecture
 
-```
-patient-monitor/
-├── common/
-│   └── protocol.h        # Shared wire protocol (ReadingMessage struct, send/recv helpers)
-│                          # Used by BOTH server and device_sim -- keeps the two in sync.
-│
-├── server/
-│   ├── main.cpp           # Acceptor loop + client handler threads + worker pool
-│   ├── safe_queue.h        # Thread-safe bounded queue (producer-consumer)
-│   ├── shared_state.h      # In-memory snapshot per patient + alert history (mutex-protected)
-│   ├── db.h                 # SQLite wrapper, serialized writes, WAL mode
-│   └── alert_engine.h      # Threshold checks with debounce logic
-│
-├── device_sim/
-│   └── main.cpp            # standalone simulator with single-device and multi-device modes
-│
-├── docker/                  # Dockerfile + docker-compose.yml
-│
-├── Makefile
-├── .gitignore
-└── README.md
-```
+The system follows a classic **Producer-Consumer** architecture over TCP, ensuring high throughput without blocking the main network thread.
 
-**Why this layout:**
-- `common/` exists because the wire protocol must be *identical* on both ends —
-  putting it in a shared header means the server and every device simulator
-  compile against the same struct definition, so there's no drift.
-- `server/` components are split one-per-concern (queue, state, db, alerts)
-  rather than crammed into `main.cpp`, so each piece is independently testable
-  and the threading boundaries are obvious from the file layout alone.
-- `device_sim/` is a **separate executable**, not a thread inside the server.
-  Real devices are separate machines/processes — running simulators as
-  separate OS processes (and later, separate Docker containers) mimics that
-  more honestly than spawning simulator threads inside the server binary.
+*   **Producers (Client Handlers):** Each connected device spawns a dedicated TCP handler thread that reads length-prefixed binary payloads and pushes them to a thread-safe bounded queue (`SafeQueue`).
+*   **Consumers (Worker Pool):** A pool of worker threads pulls batches of readings from the queue.
+*   **Persistence (SQLite WAL):** Workers bulk-insert readings and alerts into an SQLite database configured in Write-Ahead Logging (WAL) mode for extreme performance.
+*   **Business Logic (Alert Engine):** Evaluates incoming readings against physiological thresholds with a debounce mechanism to prevent alert spam.
+*   **State Management (SharedState):** Maintains a live, mutex-protected snapshot of the hospital floor.
+*   **Presentation (Dashboard):** A dedicated thread polls the `SharedState` and draws a live `ncurses` UI in the terminal.
 
-The ncurses dashboard now runs as a thread inside the server process and reads
-`SharedState` directly, which matches the architecture diagram more closely.
+## Getting Started
 
-## Build & run
+You can run this project effortlessly using **Docker** (recommended) or natively on **Linux / WSL**.
 
-```bash
-make                  # builds both server and device_sim
+### Option 1: Docker (Recommended)
 
-./server/patient_server                      # terminal 1
-./device_sim/device_sim 1                     # terminal 2 -- patient ID 1
-./device_sim/device_sim 2                     # terminal 3 -- patient ID 2
-./device_sim/device_sim 3                     # terminal 4 -- patient ID 3
-```
+Running via Docker Compose is the easiest way to start both the server and the device simulators without installing dependencies.
 
-The server also accepts an optional database path, which is how the Docker setup
-shares one SQLite file between the server and the simulator containers:
+1. **Start the System**:
+   ```bash
+   docker compose -f docker/docker-compose.yml up -d
+   ```
+2. **View the Live Dashboard**: 
+   Attach your terminal to the server to see the real-time ncurses UI:
+   ```bash
+   docker attach docker-server-1
+   ```
+   *(To exit the dashboard, press `q` on your keyboard).*
 
-```bash
-./server/patient_server /data/patient_monitor.db
-```
+3. **Scale the Number of Patients**:
+   You can easily simulate an entire hospital wing by scaling the number of devices:
+   ```bash
+   docker compose -f docker/docker-compose.yml up -d --scale device=5
+   ```
 
-Or via Makefile shortcuts (each blocks in the foreground, so use separate terminals):
-```bash
-make run-server
-make run-sim1
-make run-sim2
-make run-sim3
-```
+### Option 2: Linux / WSL (Native)
 
-Data lands in `server/patient_monitor.db`. Inspect it directly:
-```bash
-sqlite3 server/patient_monitor.db "SELECT * FROM readings ORDER BY id DESC LIMIT 10;"
-sqlite3 server/patient_monitor.db "SELECT * FROM alerts;"
-```
+If you prefer building from source, ensure you have `g++`, `make`, `libsqlite3-dev`, and `libncurses-dev` installed.
 
-`make clean` removes build artifacts and the database.
+1. **Build the project**:
+   ```bash
+   make
+   ```
+2. **Start the Server** (Terminal 1):
+   ```bash
+   make run-server
+   ```
+3. **Start a Device Simulator** (Terminal 2):
+   ```bash
+   make run-sim1
+   ```
 
-## Status
+## Advanced Commands & Options
 
-- [x] TCP server, multithreaded (one thread per connected device)
-- [x] Length-prefixed binary protocol
-- [x] Producer-consumer queue + worker pool
-- [x] SQLite persistence (WAL mode, serialized writes)
-- [x] Threshold-based alerts with debounce
-- [x] Device simulator with per-patient baselines + anomaly injection
-- [x] ncurses dashboard thread inside the server process
-- [x] Docker + docker-compose
-- [x] stress helper for 50 devices via `--count`
-- [x] server TSan target for concurrency checking
-- [ ] Stress test (50+ simulated devices)
+Here are some helpful commands for interacting with the database, running stress tests, and managing the project.
+
+| Goal | Command | Environment |
+| :--- | :--- | :--- |
+| **Simulate 50 Patients** | `make run-stress50` | Linux / WSL |
+| **Simulate Specific Patient** | `./device_sim/device_sim <patient_id> 127.0.0.1 8080` | Linux / WSL |
+| **View Latest DB Readings** | `sqlite3 server/patient_monitor.db "SELECT * FROM readings ORDER BY timestamp DESC LIMIT 10;"` | Linux / WSL |
+| **View Latest DB Alerts** | `sqlite3 server/patient_monitor.db "SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 10;"` | Linux / WSL |
+| **View DB via Docker** | `docker run --rm -it -v docker_patient-data:/data keinos/sqlite3 /data/patient_monitor.db "SELECT * FROM readings ORDER BY id DESC LIMIT 15;"` | Docker |
+| **Clean Build & DB** | `make clean` | Linux / WSL |
+| **Stop Docker Containers** | `docker compose -f docker/docker-compose.yml down` | Docker |
+
+## Directory Structure
+
+- `common/`: Shared wire protocol definition (`ReadingMessage` struct). Shared to prevent struct drift between server and devices.
+- `server/`: One-per-concern splitting of backend components (queue, state, db, alerts).
+- `device_sim/`: Standalone simulator representing a physical bedside monitor.
+- `docker/`: Contains the multi-stage `Dockerfile` and `docker-compose.yml`.

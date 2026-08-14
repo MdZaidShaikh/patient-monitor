@@ -41,7 +41,9 @@ private:
                       bool breached, uint32_t timestamp) {
         std::string key = std::to_string(patient_id) + ":" + vital;
         std::lock_guard<std::mutex> lock(mutex_);
-        bool was_breached = active_breaches_[key];
+        
+        auto it = active_breaches_.find(key);
+        bool was_breached = (it != active_breaches_.end() && it->second);
 
         if (breached && !was_breached) {
             // Transition: normal -> breach. Fire the alert.
@@ -51,7 +53,7 @@ private:
             active_breaches_[key] = true;
         } else if (!breached && was_breached) {
             // Transition: breach -> normal. Clear the flag, stay quiet.
-            active_breaches_[key] = false;
+            active_breaches_.erase(it);
         }
         // breach->breach or normal->normal: no action, this is the debounce.
     }

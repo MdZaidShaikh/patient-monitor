@@ -18,6 +18,8 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <mutex>
+#include <condition_variable>
 
 constexpr int PORT = 8080;
 constexpr int NUM_WORKERS = 4;
@@ -28,10 +30,20 @@ SafeQueue<ReadingMessage> g_queue(1000);
 SharedState g_state;
 std::atomic<bool> g_running{true};
 std::atomic<int> g_connected_clients{0};
+std::mutex g_clients_mutex;
+std::set<int> g_active_clients;
+std::condition_variable g_clients_cv;
 
 void handle_signal(int) {
     g_running = false;
     g_queue.shutdown();
+    
+    std::lock_guard<std::mutex> lock(g_clients_mutex);
+    for (int fd : g_active_clients) {
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+    }
+    g_active_clients.clear();
 }
 
 void draw_patient_row(int row, const PatientSnapshot& snap, bool active_alert) {
@@ -145,8 +157,17 @@ void client_handler(int client_fd, sockaddr_in client_addr) {
     }
 
     if (last_patient_id != 0) g_state.mark_disconnected(last_patient_id);
+    
+    {
+        std::lock_guard<std::mutex> lock(g_clients_mutex);
+        if (g_active_clients.count(client_fd)) {
+            close(client_fd);
+            g_active_clients.erase(client_fd);
+        }
+    }
+    
     g_connected_clients--;
-    close(client_fd);
+    g_clients_cv.notify_all();
 }
 
 // Worker threads: pop readings off the queue, persist to SQLite, update the
@@ -215,22 +236,38 @@ int main(int argc, char* argv[]) {
     std::cout << "Patient monitor server listening on port " << PORT << " with "
               << NUM_WORKERS << " workers...\n";
 
-    std::vector<std::thread> client_threads;
     while (g_running) {
-        sockaddr_in client_addr{};
-        socklen_t client_len = sizeof(client_addr);
-        int client_fd = accept(server_fd, (sockaddr*)&client_addr, &client_len);
-        if (client_fd < 0) {
-            if (!g_running) break; // accept() interrupted by shutdown
-            continue;
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(server_fd, &readfds);
+        timeval tv{0, 500000}; // 500ms timeout
+        
+        int ret = select(server_fd + 1, &readfds, nullptr, nullptr, &tv);
+        if (ret > 0 && FD_ISSET(server_fd, &readfds)) {
+            sockaddr_in client_addr{};
+            socklen_t client_len = sizeof(client_addr);
+            int client_fd = accept(server_fd, (sockaddr*)&client_addr, &client_len);
+            if (client_fd < 0) {
+                if (!g_running) break; // accept() interrupted by shutdown
+                continue;
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_clients_mutex);
+                g_active_clients.insert(client_fd);
+            }
+            std::thread(client_handler, client_fd, client_addr).detach();
         }
-        client_threads.emplace_back(client_handler, client_fd, client_addr);
     }
 
     std::cout << "\nShutting down...\n";
     close(server_fd);
     g_queue.shutdown();
-    for (auto& t : client_threads) if (t.joinable()) t.join();
+    
+    {
+        std::unique_lock<std::mutex> lock(g_clients_mutex);
+        g_clients_cv.wait(lock, [] { return g_active_clients.empty(); });
+    }
+
     for (auto& t : workers) if (t.joinable()) t.join();
     if (dashboard_thread.joinable()) dashboard_thread.join();
     return 0;
